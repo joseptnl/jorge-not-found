@@ -5,7 +5,7 @@ static constexpr uint64 MAX_PROJECTS = 100;
 static constexpr uint64 MAX_PROJECTS_PER_USER = 50;
 static constexpr uint64 EPOCH_FEE = 1; // Fee per epoch to keep the vault active
 
-struct PaymentEscrow : public ContractBase
+struct HM25 : public ContractBase
 {
 public:
     // Project status enum
