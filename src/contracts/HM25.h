@@ -6,19 +6,27 @@ const uint64_t PPG_MIN_GUARANTEE_PERIOD = 7ULL;
 const uint64_t PPG_MAX_DESCRIPTION_LENGTH = 256;
 
 // Type aliases
+
 using id = uint64_t;  // Assuming id is a 64-bit identifier
 const id NULL_ID = 0;
 
-class HM25 {
+enum ProjectStatus {
+    PENDING = 0,
+    IN_PROGRESS = 1, 
+    COMPLETED = 2,
+    CANCELED_BY_CLIENT = 3,
+    EXPIRED = 4,
+    FUNDS_RELEASED = 5
+};
+
+struct HM252 
+{
+};
+
+
+struct HM25 : public ContractBase
+{
 public:
-    enum ProjectStatus {
-        PENDING = 0,
-        IN_PROGRESS = 1, 
-        COMPLETED = 2,
-        CANCELED_BY_CLIENT = 3,
-        EXPIRED = 4,
-        FUNDS_RELEASED = 5
-    };
 
     struct Project {
         uint64_t projectId;
