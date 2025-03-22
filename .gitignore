@@ -9,3 +9,4 @@ x64/
 /test/universe.*
 /test/contract0???.???
 /test/tmp_file_*
+**/node_modules/
