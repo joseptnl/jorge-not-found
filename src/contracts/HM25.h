@@ -1,8 +1,8 @@
 using namespace QPI;
 
 // Constants
-static constexpr uint64 MAX_PROJECTS = 100;
-static constexpr uint64 MAX_PROJECTS_PER_USER = 50;
+static constexpr uint64 MAX_PROJECTS = 128; // Updated to be a power of 2
+static constexpr uint64 MAX_PROJECTS_PER_USER = 64; // Updated to be a power of 2
 static constexpr uint64 EPOCH_FEE = 1; // Fee per epoch to keep the vault active
 
 struct HM25 : public ContractBase
@@ -145,7 +145,7 @@ private:
     Array<uint64, MAX_PROJECTS_PER_USER> providerProjectCounts;
     
     // Helper function to create a unique project ID
-    id hashId(id client, id provider, uint64 epoch) {
+    static id hashId(id client, id provider, uint64 epoch) {
         id result;
         // Simple hash function - XOR client and provider IDs
         for (uint64 i = 0; i < 32; i++) {
@@ -265,7 +265,7 @@ private:
         findClientIndex_input ci_input;
         ci_input.wallet = qpi.invocator();
         findClientIndex_output ci_output;
-        this->findClientIndex(qpi, state, ci_input, ci_output);
+        findClientIndex(qpi, state, ci_input, ci_output);
         
         uint64 clientIndex = ci_output.index;
         uint64 clientCount = state.clientProjectCounts.get(clientIndex);
@@ -277,7 +277,7 @@ private:
         findProviderIndex_input pi_input;
         pi_input.wallet = input.providerWallet;
         findProviderIndex_output pi_output;
-        this->findProviderIndex(qpi, state, pi_input, pi_output);
+        findProviderIndex(qpi, state, pi_input, pi_output);
         
         uint64 providerIndex = pi_output.index;
         uint64 providerCount = state.providerProjectCounts.get(providerIndex);
