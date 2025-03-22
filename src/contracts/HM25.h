@@ -1,575 +1,844 @@
 using namespace QPI;
 
 // Constants
-static constexpr uint64 MAX_PROJECTS = 128; // Updated to be a power of 2
-static constexpr uint64 MAX_PROJECTS_PER_USER = 64; // Updated to be a power of 2
-static constexpr uint64 EPOCH_FEE = 1; // Fee per epoch to keep the vault active
+constexpr uint64 HM25_MAX_PROJECTS = 4096;
+constexpr uint64 HM25_MIN_DEPOSIT_AMOUNT = 1000000; // Minimum deposit: 1 QU
+constexpr uint64 HM25_MAINTENANCE_FEE = 100000; // Fee per epoch to maintain active project
+constexpr uint64 HM25_CREATION_FEE = 1000000; // Fee to create a project
+constexpr uint64 HM25_DURATION_MIN_EPOCHS = 1; // Minimum project duration
+constexpr uint64 HM25_DURATION_MAX_EPOCHS = 52; // Maximum project duration (1 year)
+constexpr uint64 HM25_WARRANTY_MIN_EPOCHS = 1; // Minimum warranty period
+constexpr uint64 HM25_WARRANTY_MAX_EPOCHS = 12; // Maximum warranty period
+
+// Project status
+constexpr uint8 HM25_STATUS_CREATED = 0;    // Project created but not funded
+constexpr uint8 HM25_STATUS_FUNDED = 1;     // Project funded, in progress
+constexpr uint8 HM25_STATUS_DELIVERED = 2;  // Project delivered, in warranty period
+constexpr uint8 HM25_STATUS_COMPLETED = 3;  // Project completed, funds released
+constexpr uint8 HM25_STATUS_CANCELED = 4;   // Project canceled, partial funds distributed
+constexpr uint8 HM25_STATUS_REFUNDED = 5;   // Project ended, funds returned to client
+constexpr uint8 HM25_STATUS_INACTIVE = 6;   // Project inactive (due to lack of maintenance fee)
+
+// Log codes
+enum HM25LogType {
+    LogProjectCreated = 0,
+    LogProjectFunded = 1,
+    LogProjectDelivered = 2,
+    LogProjectCompleted = 3,
+    LogProjectCanceled = 4,
+    LogProjectRefunded = 5,
+    LogProjectInactive = 6,
+    LogInsufficientFunds = 7,
+    LogUnauthorized = 8,
+    LogInvalidState = 9,
+    LogMaintenancePaid = 10
+};
+
+struct HM25Logger {
+    uint32 _contractIndex;
+    uint32 _type;
+    uint64 projectId;
+    id clientId;
+    id providerId;
+    uint64 amount;
+    char _terminator;
+};
+
+struct HM25
+{
+};
 
 struct HM25 : public ContractBase
 {
 public:
-    // Project status enum
-    enum ProjectStatus {
-        Created = 0,
-        InProgress = 1,
-        Completed = 2,
-        Approved = 3,
-        Cancelled = 4,
-        Expired = 5,
-        FundsReleased = 6
-    };
-    
     // Project data structure
     struct Project {
-        id projectId;
-        id clientWallet;
-        id providerWallet;
-        id serviceContract; // Description/terms
-        uint64 fundAmount;
-        uint64 startEpoch;
-        uint64 endEpoch;
-        uint64 warrantyPeriodEpochs;
-        uint64 completedEpoch;
-        uint64 approvedEpoch;
-        uint64 cancelledEpoch;
-        uint8 status; // ProjectStatus
+        id clientId;                  // Client wallet address
+        id providerId;                // Provider wallet address
+        id contractDescription;       // Description or hash of the contract
+        uint64 totalAmount;           // Total project amount
+        uint64 remainingAmount;       // Remaining amount (after potential partial releases or fees)
+        uint32 creationEpoch;         // When the project was created
+        uint32 deadlineEpoch;         // Project must be delivered by this epoch
+        uint32 warrantyEndEpoch;      // End of warranty period
+        uint32 lastMaintenanceEpoch;  // Last epoch when maintenance fee was paid
+        uint8 status;                 // Project status
+        bit isActive;                 // Is the project active
     };
-    
-    // Input/output structs for public functions
-    struct CreateProject_input {
-        id providerWallet;
-        id serviceContract;
-        uint64 timeframeEpochs;
-        uint64 warrantyPeriodEpochs;
+
+    // Input and output structures for procedures and functions
+    struct createProject_input {
+        id clientId;              // Client wallet
+        id providerId;            // Provider wallet
+        id contractDescription;   // Project description/contract
+        uint32 durationEpochs;    // Duration in epochs
+        uint32 warrantyEpochs;    // Warranty period in epochs
     };
-    struct CreateProject_output {};
-    
-    struct CompleteProject_input {
-        id projectId;
+    struct createProject_output {
+        uint64 projectId;         // Created project ID or 0 if failed
     };
-    struct CompleteProject_output {};
-    
-    struct ApproveProject_input {
-        id projectId;
+
+    struct fundProject_input {
+        uint64 projectId;         // Project ID to fund
     };
-    struct ApproveProject_output {};
-    
-    struct CancelProject_input {
-        id projectId;
+    struct fundProject_output {
+        uint8 result;             // 1: success, 0: failed
     };
-    struct CancelProject_output {};
-    
-    struct WithdrawFunds_input {
-        id projectId;
+
+    struct deliverProject_input {
+        uint64 projectId;         // Project ID to mark as delivered
     };
-    struct WithdrawFunds_output {};
-    
-    struct GetProjectDetails_input {
-        id projectId;
+    struct deliverProject_output {
+        uint8 result;             // 1: success, 0: failed
     };
-    struct GetProjectDetails_output {
+
+    struct approveProject_input {
+        uint64 projectId;         // Project ID to approve
+    };
+    struct approveProject_output {
+        uint8 result;             // 1: success, 0: failed
+    };
+
+    struct cancelProject_input {
+        uint64 projectId;         // Project ID to cancel
+    };
+    struct cancelProject_output {
+        uint8 result;             // 1: success, 0: failed
+    };
+
+    struct refundProject_input {
+        uint64 projectId;         // Project ID to refund
+    };
+    struct refundProject_output {
+        uint8 result;             // 1: success, 0: failed
+    };
+
+    struct payMaintenance_input {
+        uint64 projectId;         // Project ID to pay maintenance for
+    };
+    struct payMaintenance_output {
+        uint8 result;             // 1: success, 0: failed
+    };
+
+    struct getProjectInfo_input {
+        uint64 projectId;         // Project ID to query
+    };
+    struct getProjectInfo_output {
+        uint8 status;             // Project status
+        id clientId;              // Client wallet
+        id providerId;            // Provider wallet
+        id contractDescription;   // Project description
+        uint64 totalAmount;       // Total project amount
+        uint64 remainingAmount;   // Remaining funds
+        uint32 creationEpoch;     // Creation epoch
+        uint32 deadlineEpoch;     // Deadline epoch
+        uint32 warrantyEndEpoch;  // Warranty end epoch
+        uint32 lastMaintenanceEpoch; // Last maintenance epoch
+        bit isActive;             // Is project active
+        uint64 partialPaymentAmount; // Current partial payment if canceled now
+    };
+
+    struct getClientProjects_input {
+        id clientId;              // Client wallet to query projects for
+    };
+    struct getClientProjects_output {
+        uint64 count;             // Number of projects
+        Array<uint64, HM25_MAX_PROJECTS> projectIds; // Project IDs
+    };
+
+    struct getProviderProjects_input {
+        id providerId;            // Provider wallet to query projects for
+    };
+    struct getProviderProjects_output {
+        uint64 count;             // Number of projects
+        Array<uint64, HM25_MAX_PROJECTS> projectIds; // Project IDs
+    };
+
+    struct calculatePartialPayment_input {
+        uint64 projectId;         // Project ID to calculate payment for
+    };
+    struct calculatePartialPayment_output {
+        uint64 clientAmount;      // Amount to return to client
+        uint64 providerAmount;    // Amount to pay to provider
+    };
+
+protected:
+    // Contract state
+    Array<Project, HM25_MAX_PROJECTS> projects;
+    uint64 nextProjectId;
+    uint64 totalFeesCollected;
+    uint64 totalFeesPaid;
+
+    // Local structures for procedure implementation
+    struct createProject_locals {
+        Project newProject;
+        uint64 projectId;
+        HM25Logger log;
+    };
+
+    struct fundProject_locals {
         Project project;
-        bit exists;
+        HM25Logger log;
     };
-    
-    struct GetClientProjects_input {};
-    struct GetClientProjects_output {
+
+    struct deliverProject_locals {
+        Project project;
+        HM25Logger log;
+    };
+
+    struct approveProject_locals {
+        Project project;
+        HM25Logger log;
+    };
+
+    struct cancelProject_locals {
+        Project project;
+        uint64 clientAmount;
+        uint64 providerAmount;
+        HM25Logger log;
+        calculatePartialPayment_input calc_input;
+        calculatePartialPayment_output calc_output;
+    };
+
+    struct refundProject_locals {
+        Project project;
+        HM25Logger log;
+    };
+
+    struct payMaintenance_locals {
+        Project project;
+        HM25Logger log;
+    };
+
+    struct getProjectInfo_locals {
+        calculatePartialPayment_input calc_input;
+        calculatePartialPayment_output calc_output;
+    };
+
+    struct getClientProjects_locals {
         uint64 count;
-        Array<id, MAX_PROJECTS_PER_USER> projectIds;
     };
-    
-    struct GetProviderProjects_input {};
-    struct GetProviderProjects_output {
+
+    struct getProviderProjects_locals {
         uint64 count;
-        Array<id, MAX_PROJECTS_PER_USER> projectIds;
     };
-    
-    struct GetStats_input {};
-    struct GetStats_output {
-        uint64 totalProjects;
-        uint64 activeProjects;
-        uint64 completedProjects;
-        uint64 cancelledProjects;
-        uint64 expiredProjects;
+
+    struct calculatePartialPayment_locals {
+        Project project;
+        uint64 totalEpochs;
+        uint64 elapsedEpochs;
+        uint64 percentComplete;
     };
-    
+
     struct END_EPOCH_locals {
-        uint64 currentEpoch;
         uint64 i;
         Project project;
-        uint64 elapsedEpochs;
-        uint64 totalEpochs;
-        uint64 percentComplete;
-        uint64 providerAmount;
-        uint64 clientAmount;
+        uint64 amountToDistribute;
     };
 
-    // Input/output structs for private functions
-    struct findProject_input {
-        id projectId;
-    };
-    struct findProject_output {
-        bit exists;
-        uint64 index;
-    };
-    
-    struct findClientIndex_input {
-        id wallet;
-    };
-    struct findClientIndex_output {
-        bit exists;
-        uint64 index;
-    };
-    
-    struct findProviderIndex_input {
-        id wallet;
-    };
-    struct findProviderIndex_output {
-        bit exists;
-        uint64 index;
-    };
+    // Helper methods for calculating partial payments based on time passed
+    PRIVATE_FUNCTION_WITH_LOCALS(calculatePartialPayment)
+        locals.project = state.projects.get(input.projectId);
+        
+        if (!locals.project.isActive || locals.project.status != HM25_STATUS_FUNDED) {
+            output.clientAmount = 0;
+            output.providerAmount = 0;
+            return;
+        }
+        
+        // Calculate percentage of project completed based on time elapsed
+        locals.totalEpochs = locals.project.deadlineEpoch - locals.project.creationEpoch;
+        locals.elapsedEpochs = qpi.epoch() - locals.project.creationEpoch;
+        
+        // Cap elapsed epochs to total epochs
+        if (locals.elapsedEpochs > locals.totalEpochs) {
+            locals.elapsedEpochs = locals.totalEpochs;
+        }
+        
+        // Calculate percentage completed (0-100)
+        locals.percentComplete = (locals.elapsedEpochs * 100) / locals.totalEpochs;
+        
+        // Calculate amounts
+        output.providerAmount = (locals.project.remainingAmount * locals.percentComplete) / 100;
+        output.clientAmount = locals.project.remainingAmount - output.providerAmount;
+    _
 
-private:
-    // State variables
-    Array<Project, MAX_PROJECTS> projects;
-    uint64 projectCount;
-    uint64 activeProjects;
-    uint64 completedProjects;
-    uint64 cancelledProjects;
-    uint64 expiredProjects;
-    
-    // Client and provider project tracking (simplified to flat arrays)
-    Array<id, MAX_PROJECTS_PER_USER * MAX_PROJECTS_PER_USER> clientProjects;
-    Array<uint64, MAX_PROJECTS_PER_USER> clientProjectCounts;
-    Array<id, MAX_PROJECTS_PER_USER * MAX_PROJECTS_PER_USER> providerProjects;
-    Array<uint64, MAX_PROJECTS_PER_USER> providerProjectCounts;
-    
-    // Helper function to create a unique project ID
-    static id hashId(id client, id provider, uint64 epoch) {
-        id result;
-        // Simple hash function - XOR client and provider IDs
-        for (uint64 i = 0; i < 32; i++) {
-            result.data[i] = client.data[i] ^ provider.data[i];
-        }
-        
-        // Mix in the epoch
-        uint8* epochBytes = (uint8*)&epoch;
-        for (uint64 i = 0; i < 8 && i < 32; i++) {
-            result.data[i] ^= epochBytes[i];
-        }
-        
-        return result;
-    }
-    
-    // Helper methods
-    PRIVATE_FUNCTION(findProject)
-        output.exists = false;
-        output.index = 0;
-        
-        for (uint64 i = 0; i < state.projectCount; i++) {
-            if (state.projects.get(i).projectId == input.projectId) {
-                output.exists = true;
-                output.index = i;
-                break;
-            }
-        }
-    _
-    
-    PRIVATE_FUNCTION(findClientIndex)
-        output.exists = false;
-        output.index = 0;
-        
-        for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-            // Check the first project for each client slot
-            uint64 baseIndex = i * MAX_PROJECTS_PER_USER;
-            if (state.clientProjectCounts.get(i) > 0 && 
-                input.wallet == state.clientProjects.get(baseIndex)) {
-                output.exists = true;
-                output.index = i;
-                break;
-            }
-        }
-        
-        // If not found and there's space, create a new entry
-        if (!output.exists) {
-            for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-                if (state.clientProjectCounts.get(i) == 0) {
-                    // Store the wallet as first element
-                    state.clientProjects.set(i * MAX_PROJECTS_PER_USER, input.wallet);
-                    output.exists = true;
-                    output.index = i;
-                    break;
-                }
-            }
-        }
-    _
-    
-    PRIVATE_FUNCTION(findProviderIndex)
-        output.exists = false;
-        output.index = 0;
-        
-        for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-            // Check the first project for each provider slot
-            uint64 baseIndex = i * MAX_PROJECTS_PER_USER;
-            if (state.providerProjectCounts.get(i) > 0 && 
-                input.wallet == state.providerProjects.get(baseIndex)) {
-                output.exists = true;
-                output.index = i;
-                break;
-            }
-        }
-        
-        // If not found and there's space, create a new entry
-        if (!output.exists) {
-            for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-                if (state.providerProjectCounts.get(i) == 0) {
-                    // Store the wallet as first element
-                    state.providerProjects.set(i * MAX_PROJECTS_PER_USER, input.wallet);
-                    output.exists = true;
-                    output.index = i;
-                    break;
-                }
-            }
-        }
-    _
-    
-    // Main functions
-    PUBLIC_PROCEDURE(CreateProject)
-        // Verify there's funding provided
-        if (qpi.invocationReward() == 0) {
+    // Main functionality procedures
+    PUBLIC_PROCEDURE_WITH_LOCALS(createProject)
+        // Validate inputs
+        if (qpi.invocationReward() < HM25_CREATION_FEE) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
             return;
         }
         
-        // Create project with unique ID
-        id projectId = hashId(qpi.invocator(), input.providerWallet, qpi.epoch());
+        if (input.clientId == NULL_ID || input.providerId == NULL_ID || 
+            input.durationEpochs < HM25_DURATION_MIN_EPOCHS || 
+            input.durationEpochs > HM25_DURATION_MAX_EPOCHS ||
+            input.warrantyEpochs < HM25_WARRANTY_MIN_EPOCHS ||
+            input.warrantyEpochs > HM25_WARRANTY_MAX_EPOCHS) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            return;
+        }
         
-        // Create new project
-        Project newProject;
-        newProject.projectId = projectId;
-        newProject.clientWallet = qpi.invocator();
-        newProject.providerWallet = input.providerWallet;
-        newProject.serviceContract = input.serviceContract;
-        newProject.fundAmount = qpi.invocationReward();
-        newProject.startEpoch = qpi.epoch();
-        newProject.endEpoch = qpi.epoch() + input.timeframeEpochs;
-        newProject.warrantyPeriodEpochs = input.warrantyPeriodEpochs;
-        newProject.completedEpoch = 0;
-        newProject.approvedEpoch = 0;
-        newProject.cancelledEpoch = 0;
-        newProject.status = ProjectStatus::Created;
+        // Find an available slot for the project
+        locals.projectId = state.nextProjectId;
         
-        // Add project to state
-        state.projects.set(state.projectCount, newProject);
+        // Initialize project
+        locals.newProject.clientId = input.clientId;
+        locals.newProject.providerId = input.providerId;
+        locals.newProject.contractDescription = input.contractDescription;
+        locals.newProject.totalAmount = 0; // Will be set when funded
+        locals.newProject.remainingAmount = 0;
+        locals.newProject.creationEpoch = qpi.epoch();
+        locals.newProject.deadlineEpoch = qpi.epoch() + input.durationEpochs;
+        locals.newProject.warrantyEndEpoch = qpi.epoch() + input.durationEpochs + input.warrantyEpochs;
+        locals.newProject.lastMaintenanceEpoch = qpi.epoch();
+        locals.newProject.status = HM25_STATUS_CREATED;
+        locals.newProject.isActive = true;
         
-        // Update client projects
-        findClientIndex_input ci_input;
-        ci_input.wallet = qpi.invocator();
-        findClientIndex_output ci_output;
-        findClientIndex(qpi, state, ci_input, ci_output);
+        // Store the project
+        state.projects.set(locals.projectId, locals.newProject);
+        state.nextProjectId++;
         
-        uint64 clientIndex = ci_output.index;
-        uint64 clientCount = state.clientProjectCounts.get(clientIndex);
-        uint64 clientOffset = clientIndex * MAX_PROJECTS_PER_USER + clientCount + 1; // +1 to skip wallet
-        state.clientProjects.set(clientOffset, projectId);
-        state.clientProjectCounts.set(clientIndex, clientCount + 1);
+        // Return remaining funds
+        if (qpi.invocationReward() > HM25_CREATION_FEE) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward() - HM25_CREATION_FEE);
+        }
         
-        // Update provider projects
-        findProviderIndex_input pi_input;
-        pi_input.wallet = input.providerWallet;
-        findProviderIndex_output pi_output;
-        findProviderIndex(qpi, state, pi_input, pi_output);
+        state.totalFeesCollected += HM25_CREATION_FEE;
         
-        uint64 providerIndex = pi_output.index;
-        uint64 providerCount = state.providerProjectCounts.get(providerIndex);
-        uint64 providerOffset = providerIndex * MAX_PROJECTS_PER_USER + providerCount + 1; // +1 to skip wallet
-        state.providerProjects.set(providerOffset, projectId);
-        state.providerProjectCounts.set(providerIndex, providerCount + 1);
+        // Log event
+        locals.log._contractIndex = HM25_CONTRACT_INDEX;
+        locals.log._type = LogProjectCreated;
+        locals.log.projectId = locals.projectId;
+        locals.log.clientId = input.clientId;
+        locals.log.providerId = input.providerId;
+        locals.log.amount = 0;
+        LOG_INFO(locals.log);
         
-        // Update counters
-        state.projectCount++;
-        state.activeProjects++;
+        // Return created project ID
+        output.projectId = locals.projectId;
     _
-    
-    PUBLIC_PROCEDURE(CompleteProject)
-        // Find project
-        findProject_input fp_input;
-        fp_input.projectId = input.projectId;
-        findProject_output fp_output;
-        this->findProject(qpi, state, fp_input, fp_output);
-        
-        if (!fp_output.exists) {
+
+    PUBLIC_PROCEDURE_WITH_LOCALS(fundProject)
+        if (qpi.invocationReward() < HM25_MIN_DEPOSIT_AMOUNT) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInsufficientFunds;
+            locals.log.projectId = input.projectId;
+            locals.log.amount = qpi.invocationReward();
+            LOG_INFO(locals.log);
+            output.result = 0;
             return;
         }
         
-        uint64 projectIndex = fp_output.index;
-        Project project = state.projects.get(projectIndex);
+        locals.project = state.projects.get(input.projectId);
         
-        // Verify caller is the provider
-        if (qpi.invocator() != project.providerWallet) {
+        // Verify project exists and is in correct state
+        if (!locals.project.isActive || locals.project.status != HM25_STATUS_CREATED) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
             return;
         }
-        
-        // Verify project is in progress
-        if (project.status != ProjectStatus::Created && project.status != ProjectStatus::InProgress) {
-            return;
-        }
-        
-        // Mark as completed
-        project.status = ProjectStatus::Completed;
-        project.completedEpoch = qpi.epoch();
-        
-        // Update state
-        state.projects.set(projectIndex, project);
-    _
-    
-    PUBLIC_PROCEDURE(ApproveProject)
-        // Find project
-        findProject_input fp_input;
-        fp_input.projectId = input.projectId;
-        findProject_output fp_output;
-        this->findProject(qpi, state, fp_input, fp_output);
-        
-        if (!fp_output.exists) {
-            return;
-        }
-        
-        uint64 projectIndex = fp_output.index;
-        Project project = state.projects.get(projectIndex);
         
         // Verify caller is the client
-        if (qpi.invocator() != project.clientWallet) {
+        if (qpi.invocator() != locals.project.clientId) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogUnauthorized;
+            locals.log.projectId = input.projectId;
+            locals.log.clientId = locals.project.clientId;
+            locals.log.providerId = locals.project.providerId;
+            LOG_INFO(locals.log);
+            output.result = 0;
             return;
         }
         
-        // Verify project is completed
-        if (project.status != ProjectStatus::Completed) {
-            return;
-        }
+        // Update project state
+        locals.project.totalAmount = qpi.invocationReward();
+        locals.project.remainingAmount = qpi.invocationReward();
+        locals.project.status = HM25_STATUS_FUNDED;
         
-        // Mark as approved
-        project.status = ProjectStatus::Approved;
-        project.approvedEpoch = qpi.epoch();
+        // Save updated project
+        state.projects.set(input.projectId, locals.project);
         
-        // Update state
-        state.projects.set(projectIndex, project);
+        // Log event
+        locals.log._contractIndex = HM25_CONTRACT_INDEX;
+        locals.log._type = LogProjectFunded;
+        locals.log.projectId = input.projectId;
+        locals.log.clientId = locals.project.clientId;
+        locals.log.providerId = locals.project.providerId;
+        locals.log.amount = qpi.invocationReward();
+        LOG_INFO(locals.log);
+        
+        output.result = 1;
     _
-    
-    PUBLIC_PROCEDURE(CancelProject)
-        // Find project
-        findProject_input fp_input;
-        fp_input.projectId = input.projectId;
-        findProject_output fp_output;
-        this->findProject(qpi, state, fp_input, fp_output);
+
+    PUBLIC_PROCEDURE_WITH_LOCALS(deliverProject)
+        locals.project = state.projects.get(input.projectId);
         
-        if (!fp_output.exists) {
+        // Verify project exists and is in correct state
+        if (!locals.project.isActive || locals.project.status != HM25_STATUS_FUNDED) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
             return;
         }
-        
-        uint64 projectIndex = fp_output.index;
-        Project project = state.projects.get(projectIndex);
-        
-        // Verify caller is the client
-        if (qpi.invocator() != project.clientWallet) {
-            return;
-        }
-        
-        // Verify project can be cancelled (not already completed or cancelled)
-        if (project.status != ProjectStatus::Created && project.status != ProjectStatus::InProgress) {
-            return;
-        }
-        
-        // Mark as cancelled
-        project.status = ProjectStatus::Cancelled;
-        project.cancelledEpoch = qpi.epoch();
-        
-        // Calculate provider's partial payment based on elapsed time
-        uint64 elapsedEpochs = qpi.epoch() - project.startEpoch;
-        uint64 totalEpochs = project.endEpoch - project.startEpoch;
-        
-        // Ensure we don't divide by zero
-        if (totalEpochs == 0) {
-            totalEpochs = 1;
-        }
-        
-        // Calculate percentage (0-100)
-        uint64 percentComplete = (elapsedEpochs * 100) / totalEpochs;
-        if (percentComplete > 100) {
-            percentComplete = 100;
-        }
-        
-        // Calculate payment amounts
-        uint64 providerAmount = (project.fundAmount * percentComplete) / 100;
-        uint64 clientAmount = project.fundAmount - providerAmount;
-        
-        // Transfer funds
-        if (providerAmount > 0) {
-            qpi.transfer(project.providerWallet, providerAmount);
-        }
-        
-        if (clientAmount > 0) {
-            qpi.transfer(project.clientWallet, clientAmount);
-        }
-        
-        // Update state
-        state.projects.set(projectIndex, project);
-        state.activeProjects--;
-        state.cancelledProjects++;
-    _
-    
-    PUBLIC_PROCEDURE(WithdrawFunds)
-        // Find project
-        findProject_input fp_input;
-        fp_input.projectId = input.projectId;
-        findProject_output fp_output;
-        this->findProject(qpi, state, fp_input, fp_output);
-        
-        if (!fp_output.exists) {
-            return;
-        }
-        
-        uint64 projectIndex = fp_output.index;
-        Project project = state.projects.get(projectIndex);
         
         // Verify caller is the provider
-        if (qpi.invocator() != project.providerWallet) {
+        if (qpi.invocator() != locals.project.providerId) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogUnauthorized;
+            locals.log.projectId = input.projectId;
+            locals.log.clientId = locals.project.clientId;
+            locals.log.providerId = locals.project.providerId;
+            LOG_INFO(locals.log);
+            output.result = 0;
             return;
         }
         
-        // Verify project is approved
-        if (project.status != ProjectStatus::Approved) {
+        // Return funds if invocation reward sent
+        if (qpi.invocationReward() > 0) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+        }
+        
+        // Check if past deadline
+        if (qpi.epoch() > locals.project.deadlineEpoch) {
+            // Project past deadline, don't allow delivery
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
             return;
         }
         
-        // Verify warranty period has passed
-        if (qpi.epoch() < project.approvedEpoch + project.warrantyPeriodEpochs) {
-            return;
-        }
+        // Update project state
+        locals.project.status = HM25_STATUS_DELIVERED;
         
-        // Transfer funds to provider
-        qpi.transfer(project.providerWallet, project.fundAmount);
+        // Save updated project
+        state.projects.set(input.projectId, locals.project);
         
-        // Update project status
-        project.status = ProjectStatus::FundsReleased;
-        state.projects.set(projectIndex, project);
+        // Log event
+        locals.log._contractIndex = HM25_CONTRACT_INDEX;
+        locals.log._type = LogProjectDelivered;
+        locals.log.projectId = input.projectId;
+        locals.log.clientId = locals.project.clientId;
+        locals.log.providerId = locals.project.providerId;
+        LOG_INFO(locals.log);
         
-        // Update counters
-        state.activeProjects--;
-        state.completedProjects++;
+        output.result = 1;
     _
-    
-    PUBLIC_FUNCTION(GetProjectDetails)
-        findProject_input fp_input;
-        fp_input.projectId = input.projectId;
-        findProject_output fp_output;
-        this->findProject(qpi, state, fp_input, fp_output);
+
+    PUBLIC_PROCEDURE_WITH_LOCALS(approveProject)
+        locals.project = state.projects.get(input.projectId);
         
-        output.exists = fp_output.exists;
-        if (output.exists) {
-            output.project = state.projects.get(fp_output.index);
+        // Verify project exists and is in correct state
+        if (!locals.project.isActive || locals.project.status != HM25_STATUS_DELIVERED) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
         }
-    _
-    
-    PUBLIC_FUNCTION(GetClientProjects)
-        findClientIndex_input ci_input;
-        ci_input.wallet = qpi.invocator();
-        findClientIndex_output ci_output;
-        this->findClientIndex(qpi, state, ci_input, ci_output);
         
-        output.count = 0;
-        if (ci_output.exists) {
-            uint64 clientIndex = ci_output.index;
-            uint64 projectCount = state.clientProjectCounts.get(clientIndex);
-            output.count = projectCount;
+        // Verify caller is the client
+        if (qpi.invocator() != locals.project.clientId) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogUnauthorized;
+            locals.log.projectId = input.projectId;
+            locals.log.clientId = locals.project.clientId;
+            locals.log.providerId = locals.project.providerId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Return funds if invocation reward sent
+        if (qpi.invocationReward() > 0) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+        }
+        
+        // Check if we need to wait for warranty period
+        if (qpi.epoch() >= locals.project.warrantyEndEpoch) {
+            // Warranty period ended, release funds and complete project
             
-            for (uint64 i = 0; i < projectCount; i++) {
-                uint64 offset = clientIndex * MAX_PROJECTS_PER_USER + i + 1; // +1 to skip wallet
-                output.projectIds.set(i, state.clientProjects.get(offset));
+            // Transfer remaining funds to provider
+            qpi.transfer(locals.project.providerId, locals.project.remainingAmount);
+            
+            // Update project status
+            locals.project.status = HM25_STATUS_COMPLETED;
+            locals.project.remainingAmount = 0;
+            
+            // Save updated project
+            state.projects.set(input.projectId, locals.project);
+            
+            // Log event
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogProjectCompleted;
+            locals.log.projectId = input.projectId;
+            locals.log.clientId = locals.project.clientId;
+            locals.log.providerId = locals.project.providerId;
+            locals.log.amount = locals.project.remainingAmount;
+            LOG_INFO(locals.log);
+        } else {
+            // Still in warranty period, just update status to wait for warranty period
+            locals.project.status = HM25_STATUS_DELIVERED; 
+            
+            // Save updated project
+            state.projects.set(input.projectId, locals.project);
+        }
+        
+        output.result = 1;
+    _
+
+    PUBLIC_PROCEDURE_WITH_LOCALS(cancelProject)
+        locals.project = state.projects.get(input.projectId);
+        
+        // Verify project exists and is in correct state
+        if (!locals.project.isActive || 
+            (locals.project.status != HM25_STATUS_FUNDED && 
+             locals.project.status != HM25_STATUS_DELIVERED)) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Verify caller is the client
+        if (qpi.invocator() != locals.project.clientId) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogUnauthorized;
+            locals.log.projectId = input.projectId;
+            locals.log.clientId = locals.project.clientId;
+            locals.log.providerId = locals.project.providerId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Return funds if invocation reward sent
+        if (qpi.invocationReward() > 0) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+        }
+        
+        // Calculate partial payments
+        locals.calc_input.projectId = input.projectId;
+        calculatePartialPayment(qpi, state, locals.calc_input, locals.calc_output, locals.calculatePartialPayment_locals);
+        locals.clientAmount = locals.calc_output.clientAmount;
+        locals.providerAmount = locals.calc_output.providerAmount;
+        
+        // Distribute funds
+        if (locals.clientAmount > 0) {
+            qpi.transfer(locals.project.clientId, locals.clientAmount);
+        }
+        
+        if (locals.providerAmount > 0) {
+            qpi.transfer(locals.project.providerId, locals.providerAmount);
+        }
+        
+        // Update project state
+        locals.project.status = HM25_STATUS_CANCELED;
+        locals.project.remainingAmount = 0;
+        
+        // Save updated project
+        state.projects.set(input.projectId, locals.project);
+        
+        // Log event
+        locals.log._contractIndex = HM25_CONTRACT_INDEX;
+        locals.log._type = LogProjectCanceled;
+        locals.log.projectId = input.projectId;
+        locals.log.clientId = locals.project.clientId;
+        locals.log.providerId = locals.project.providerId;
+        locals.log.amount = locals.providerAmount;
+        LOG_INFO(locals.log);
+        
+        output.result = 1;
+    _
+
+    PUBLIC_PROCEDURE_WITH_LOCALS(refundProject)
+        locals.project = state.projects.get(input.projectId);
+        
+        // Verify project exists and is in FUNDED state
+        if (!locals.project.isActive || locals.project.status != HM25_STATUS_FUNDED) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Verify past deadline and caller is the client
+        if (qpi.epoch() <= locals.project.deadlineEpoch || qpi.invocator() != locals.project.clientId) {
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogUnauthorized;
+            locals.log.projectId = input.projectId;
+            locals.log.clientId = locals.project.clientId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Return funds if invocation reward sent
+        if (qpi.invocationReward() > 0) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+        }
+        
+        // Return all remaining funds to client due to project not being delivered on time
+        qpi.transfer(locals.project.clientId, locals.project.remainingAmount);
+        
+        // Update project state
+        locals.project.status = HM25_STATUS_REFUNDED;
+        locals.project.remainingAmount = 0;
+        
+        // Save updated project
+        state.projects.set(input.projectId, locals.project);
+        
+        // Log event
+        locals.log._contractIndex = HM25_CONTRACT_INDEX;
+        locals.log._type = LogProjectRefunded;
+        locals.log.projectId = input.projectId;
+        locals.log.clientId = locals.project.clientId;
+        locals.log.amount = locals.project.remainingAmount;
+        LOG_INFO(locals.log);
+        
+        output.result = 1;
+    _
+
+    PUBLIC_PROCEDURE_WITH_LOCALS(payMaintenance)
+        if (qpi.invocationReward() < HM25_MAINTENANCE_FEE) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInsufficientFunds;
+            locals.log.projectId = input.projectId;
+            locals.log.amount = qpi.invocationReward();
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        locals.project = state.projects.get(input.projectId);
+        
+        // Verify project exists and is in active state with money remaining
+        if (!locals.project.isActive || 
+            locals.project.status == HM25_STATUS_COMPLETED || 
+            locals.project.status == HM25_STATUS_CANCELED ||
+            locals.project.status == HM25_STATUS_REFUNDED ||
+            locals.project.status == HM25_STATUS_INACTIVE ||
+            locals.project.remainingAmount == 0) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogInvalidState;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Verify caller is the client or provider
+        if (qpi.invocator() != locals.project.clientId && qpi.invocator() != locals.project.providerId) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward());
+            locals.log._contractIndex = HM25_CONTRACT_INDEX;
+            locals.log._type = LogUnauthorized;
+            locals.log.projectId = input.projectId;
+            LOG_INFO(locals.log);
+            output.result = 0;
+            return;
+        }
+        
+        // Return excess funds
+        if (qpi.invocationReward() > HM25_MAINTENANCE_FEE) {
+            qpi.transfer(qpi.invocator(), qpi.invocationReward() - HM25_MAINTENANCE_FEE);
+        }
+        
+        // Update maintenance epoch
+        locals.project.lastMaintenanceEpoch = qpi.epoch();
+        
+        // Update fees collected
+        state.totalFeesCollected += HM25_MAINTENANCE_FEE;
+        
+        // Save updated project
+        state.projects.set(input.projectId, locals.project);
+        
+        // Log event
+        locals.log._contractIndex = HM25_CONTRACT_INDEX;
+        locals.log._type = LogMaintenancePaid;
+        locals.log.projectId = input.projectId;
+        locals.log.amount = HM25_MAINTENANCE_FEE;
+        LOG_INFO(locals.log);
+        
+        output.result = 1;
+    _
+
+    // Query functions
+    PUBLIC_FUNCTION_WITH_LOCALS(getProjectInfo)
+        output.status = HM25_STATUS_INACTIVE;
+        output.clientId = NULL_ID;
+        output.providerId = NULL_ID;
+        output.contractDescription = NULL_ID;
+        output.totalAmount = 0;
+        output.remainingAmount = 0;
+        output.creationEpoch = 0;
+        output.deadlineEpoch = 0;
+        output.warrantyEndEpoch = 0;
+        output.lastMaintenanceEpoch = 0;
+        output.isActive = false;
+        output.partialPaymentAmount = 0;
+        
+        if (input.projectId >= state.nextProjectId) {
+            return;
+        }
+        
+        Project project = state.projects.get(input.projectId);
+        
+        if (!project.isActive) {
+            return;
+        }
+        
+        output.status = project.status;
+        output.clientId = project.clientId;
+        output.providerId = project.providerId;
+        output.contractDescription = project.contractDescription;
+        output.totalAmount = project.totalAmount;
+        output.remainingAmount = project.remainingAmount;
+        output.creationEpoch = project.creationEpoch;
+        output.deadlineEpoch = project.deadlineEpoch;
+        output.warrantyEndEpoch = project.warrantyEndEpoch;
+        output.lastMaintenanceEpoch = project.lastMaintenanceEpoch;
+        output.isActive = project.isActive;
+        
+        // Calculate partial payment if in funded state
+        if (project.status == HM25_STATUS_FUNDED) {
+            locals.calc_input.projectId = input.projectId;
+            calculatePartialPayment(qpi, state, locals.calc_input, locals.calc_output, locals.calculatePartialPayment_locals);
+            output.partialPaymentAmount = locals.calc_output.providerAmount;
+        }
+    _
+
+    PUBLIC_FUNCTION_WITH_LOCALS(getClientProjects)
+        output.count = 0;
+        
+        for (locals.count = 0; locals.count < state.nextProjectId && locals.count < HM25_MAX_PROJECTS; locals.count++) {
+            Project project = state.projects.get(locals.count);
+            if (project.isActive && project.clientId == input.clientId) {
+                output.projectIds.set(output.count, locals.count);
+                output.count++;
             }
         }
     _
-    
-    PUBLIC_FUNCTION(GetProviderProjects)
-        findProviderIndex_input pi_input;
-        pi_input.wallet = qpi.invocator();
-        findProviderIndex_output pi_output;
-        this->findProviderIndex(qpi, state, pi_input, pi_output);
-        
+
+    PUBLIC_FUNCTION_WITH_LOCALS(getProviderProjects)
         output.count = 0;
-        if (pi_output.exists) {
-            uint64 providerIndex = pi_output.index;
-            uint64 projectCount = state.providerProjectCounts.get(providerIndex);
-            output.count = projectCount;
-            
-            for (uint64 i = 0; i < projectCount; i++) {
-                uint64 offset = providerIndex * MAX_PROJECTS_PER_USER + i + 1; // +1 to skip wallet
-                output.projectIds.set(i, state.providerProjects.get(offset));
+        
+        for (locals.count = 0; locals.count < state.nextProjectId && locals.count < HM25_MAX_PROJECTS; locals.count++) {
+            Project project = state.projects.get(locals.count);
+            if (project.isActive && project.providerId == input.providerId) {
+                output.projectIds.set(output.count, locals.count);
+                output.count++;
             }
         }
     _
-    
-    PUBLIC_FUNCTION(GetStats)
-        output.totalProjects = state.projectCount;
-        output.activeProjects = state.activeProjects;
-        output.completedProjects = state.completedProjects;
-        output.cancelledProjects = state.cancelledProjects;
-        output.expiredProjects = state.expiredProjects;
+
+    // System procedures
+    INITIALIZE
+        state.nextProjectId = 0;
+        state.totalFeesCollected = 0;
+        state.totalFeesPaid = 0;
     _
-    
+
     END_EPOCH_WITH_LOCALS
-        locals.currentEpoch = qpi.epoch();
-        
-        // Process all active projects
-        for (locals.i = 0; locals.i < state.projectCount; locals.i++) {
+        // Check maintenance and distribute fees
+        for (locals.i = 0; locals.i < state.nextProjectId; locals.i++) {
             locals.project = state.projects.get(locals.i);
             
-            // Handle expired projects
-            if (locals.project.status == ProjectStatus::Created || locals.project.status == ProjectStatus::InProgress) {
-                if (locals.currentEpoch > locals.project.endEpoch) {
-                    // Project expired, return funds to client
-                    locals.project.status = ProjectStatus::Expired;
-                    qpi.transfer(locals.project.clientWallet, locals.project.fundAmount);
+            if (locals.project.isActive && 
+                (locals.project.status == HM25_STATUS_FUNDED || 
+                 locals.project.status == HM25_STATUS_DELIVERED)) {
+                
+                // Check if maintenance fee is needed
+                if (qpi.epoch() > locals.project.lastMaintenanceEpoch + 1) {
+                    // More than one epoch passed since last maintenance payment
                     
-                    // Update state
-                    state.projects.set(locals.i, locals.project);
-                    state.activeProjects--;
-                    state.expiredProjects++;
-                } else {
-                    // Pay epoch fee to keep vault active
-                    if (locals.project.fundAmount > EPOCH_FEE) {
-                        locals.project.fundAmount -= EPOCH_FEE;
-                        qpi.burn(EPOCH_FEE); // Burn the fee
-                        state.projects.set(locals.i, locals.project);
+                    // Set to inactive if no funds to cover maintenance fee
+                    if (locals.project.remainingAmount <= HM25_MAINTENANCE_FEE) {
+                        locals.project.isActive = false;
+                        locals.project.status = HM25_STATUS_INACTIVE;
+                        
+                        // Log event
+                        HM25Logger log;
+                        log._contractIndex = HM25_CONTRACT_INDEX;
+                        log._type = LogProjectInactive;
+                        log.projectId = locals.i;
+                        LOG_INFO(log);
+                    } else {
+                        // Deduct maintenance fee from project funds
+                        locals.project.remainingAmount -= HM25_MAINTENANCE_FEE;
+                        locals.project.lastMaintenanceEpoch = qpi.epoch();
+                        state.totalFeesCollected += HM25_MAINTENANCE_FEE;
                     }
+                    
+                    state.projects.set(locals.i, locals.project);
+                }
+                
+                // Auto-complete projects when warranty period is over for delivered projects
+                if (locals.project.status == HM25_STATUS_DELIVERED && 
+                    qpi.epoch() >= locals.project.warrantyEndEpoch) {
+                    
+                    // Release funds to provider
+                    qpi.transfer(locals.project.providerId, locals.project.remainingAmount);
+                    
+                    // Update status
+                    locals.project.status = HM25_STATUS_COMPLETED;
+                    locals.project.remainingAmount = 0;
+                    
+                    // Save updated project
+                    state.projects.set(locals.i, locals.project);
+                    
+                    // Log event
+                    HM25Logger log;
+                    log._contractIndex = HM25_CONTRACT_INDEX;
+                    log._type = LogProjectCompleted;
+                    log.projectId = locals.i;
+                    log.providerId = locals.project.providerId;
+                    log.amount = locals.project.remainingAmount;
+                    LOG_INFO(log);
                 }
             }
         }
-    _
-    
-    // Function registrations
-    REGISTER_USER_FUNCTIONS_AND_PROCEDURES
-        REGISTER_USER_PROCEDURE(CreateProject, 1);
-        REGISTER_USER_PROCEDURE(CompleteProject, 2);
-        REGISTER_USER_PROCEDURE(ApproveProject, 3);
-        REGISTER_USER_PROCEDURE(CancelProject, 4);
-        REGISTER_USER_PROCEDURE(WithdrawFunds, 5);
         
-        REGISTER_USER_FUNCTION(GetProjectDetails, 1);
-        REGISTER_USER_FUNCTION(GetClientProjects, 2);
-        REGISTER_USER_FUNCTION(GetProviderProjects, 3);
-        REGISTER_USER_FUNCTION(GetStats, 4);
-    _
-    
-    INITIALIZE
-        state.projectCount = 0;
-        state.activeProjects = 0;
-        state.completedProjects = 0;
-        state.cancelledProjects = 0;
-        state.expiredProjects = 0;
+        // Distribute collected fees to shareholders if applicable
+        locals.amountToDistribute = div(state.totalFeesCollected - state.totalFeesPaid, uint64(NUMBER_OF_COMPUTORS));
         
-        // Initialize client and provider tracking arrays
-        for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-            state.clientProjectCounts.set(i, 0);
-            state.providerProjectCounts.set(i, 0);
+        if (locals.amountToDistribute > 0 && state.totalFeesCollected > state.totalFeesPaid) {
+            if (qpi.distributeDividends(locals.amountToDistribute)) {
+                state.totalFeesPaid += locals.amountToDistribute * NUMBER_OF_COMPUTORS;
+            }
         }
+    _
+
+    REGISTER_USER_FUNCTIONS_AND_PROCEDURES
+        // Procedures
+        REGISTER_USER_PROCEDURE(createProject, 1);
+        REGISTER_USER_PROCEDURE(fundProject, 2);
+        REGISTER_USER_PROCEDURE(deliverProject, 3);
+        REGISTER_USER_PROCEDURE(approveProject, 4);
+        REGISTER_USER_PROCEDURE(cancelProject, 5);
+        REGISTER_USER_PROCEDURE(refundProject, 6);
+        REGISTER_USER_PROCEDURE(payMaintenance, 7);
+        
+        // Functions
+        REGISTER_USER_FUNCTION(getProjectInfo, 8);
+        REGISTER_USER_FUNCTION(getClientProjects, 9);
+        REGISTER_USER_FUNCTION(getProviderProjects, 10);
     _
 };
