@@ -44,10 +44,6 @@ struct HM25Logger {
     char _terminator;
 };
 
-struct HM25
-{
-};
-
 struct HM25 : public ContractBase
 {
 public:
@@ -189,6 +185,7 @@ protected:
     struct approveProject_locals {
         Project project;
         HM25Logger log;
+        calculatePartialPayment_locals calculatePartialPayment_locals;
     };
 
     struct cancelProject_locals {
