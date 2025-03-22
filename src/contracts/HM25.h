@@ -35,7 +35,7 @@ public:
         uint8 status; // ProjectStatus
     };
     
-    // Input/output structs for functions
+    // Input/output structs for public functions
     struct CreateProject_input {
         id providerWallet;
         id serviceContract;
@@ -104,6 +104,31 @@ public:
         uint64 clientAmount;
     };
 
+    // Input/output structs for private functions
+    struct findProject_input {
+        id projectId;
+    };
+    struct findProject_output {
+        bit exists;
+        uint64 index;
+    };
+    
+    struct findClientIndex_input {
+        id wallet;
+    };
+    struct findClientIndex_output {
+        bit exists;
+        uint64 index;
+    };
+    
+    struct findProviderIndex_input {
+        id wallet;
+    };
+    struct findProviderIndex_output {
+        bit exists;
+        uint64 index;
+    };
+
 private:
     // State variables
     Array<Project, MAX_PROJECTS> projects;
@@ -113,11 +138,28 @@ private:
     uint64 cancelledProjects;
     uint64 expiredProjects;
     
-    // Client and provider project tracking
-    Array<id, MAX_PROJECTS_PER_USER> clientProjects[MAX_PROJECTS_PER_USER];
+    // Client and provider project tracking (simplified to flat arrays)
+    Array<id, MAX_PROJECTS_PER_USER * MAX_PROJECTS_PER_USER> clientProjects;
     Array<uint64, MAX_PROJECTS_PER_USER> clientProjectCounts;
-    Array<id, MAX_PROJECTS_PER_USER> providerProjects[MAX_PROJECTS_PER_USER];
+    Array<id, MAX_PROJECTS_PER_USER * MAX_PROJECTS_PER_USER> providerProjects;
     Array<uint64, MAX_PROJECTS_PER_USER> providerProjectCounts;
+    
+    // Helper function to create a unique project ID
+    id hashId(id client, id provider, uint64 epoch) {
+        id result;
+        // Simple hash function - XOR client and provider IDs
+        for (uint64 i = 0; i < 32; i++) {
+            result.data[i] = client.data[i] ^ provider.data[i];
+        }
+        
+        // Mix in the epoch
+        uint8* epochBytes = (uint8*)&epoch;
+        for (uint64 i = 0; i < 8 && i < 32; i++) {
+            result.data[i] ^= epochBytes[i];
+        }
+        
+        return result;
+    }
     
     // Helper methods
     PRIVATE_FUNCTION(findProject)
@@ -133,28 +175,60 @@ private:
         }
     _
     
-    PRIVATE_FUNCTION(getClientIndex)
+    PRIVATE_FUNCTION(findClientIndex)
         output.exists = false;
         output.index = 0;
         
         for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-            if (input.wallet == state.clientProjects[i].get(0)) {
+            // Check the first project for each client slot
+            uint64 baseIndex = i * MAX_PROJECTS_PER_USER;
+            if (state.clientProjectCounts.get(i) > 0 && 
+                input.wallet == state.clientProjects.get(baseIndex)) {
                 output.exists = true;
                 output.index = i;
                 break;
             }
         }
+        
+        // If not found and there's space, create a new entry
+        if (!output.exists) {
+            for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
+                if (state.clientProjectCounts.get(i) == 0) {
+                    // Store the wallet as first element
+                    state.clientProjects.set(i * MAX_PROJECTS_PER_USER, input.wallet);
+                    output.exists = true;
+                    output.index = i;
+                    break;
+                }
+            }
+        }
     _
     
-    PRIVATE_FUNCTION(getProviderIndex)
+    PRIVATE_FUNCTION(findProviderIndex)
         output.exists = false;
         output.index = 0;
         
         for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
-            if (input.wallet == state.providerProjects[i].get(0)) {
+            // Check the first project for each provider slot
+            uint64 baseIndex = i * MAX_PROJECTS_PER_USER;
+            if (state.providerProjectCounts.get(i) > 0 && 
+                input.wallet == state.providerProjects.get(baseIndex)) {
                 output.exists = true;
                 output.index = i;
                 break;
+            }
+        }
+        
+        // If not found and there's space, create a new entry
+        if (!output.exists) {
+            for (uint64 i = 0; i < MAX_PROJECTS_PER_USER; i++) {
+                if (state.providerProjectCounts.get(i) == 0) {
+                    // Store the wallet as first element
+                    state.providerProjects.set(i * MAX_PROJECTS_PER_USER, input.wallet);
+                    output.exists = true;
+                    output.index = i;
+                    break;
+                }
             }
         }
     _
@@ -166,7 +240,7 @@ private:
             return;
         }
         
-        // Create project with unique ID (using combination of client, provider, and timestamp)
+        // Create project with unique ID
         id projectId = hashId(qpi.invocator(), input.providerWallet, qpi.epoch());
         
         // Create new project
@@ -191,22 +265,24 @@ private:
         findClientIndex_input ci_input;
         ci_input.wallet = qpi.invocator();
         findClientIndex_output ci_output;
-        findClientIndex(qpi, state, ci_input, ci_output);
+        this->findClientIndex(qpi, state, ci_input, ci_output);
         
         uint64 clientIndex = ci_output.index;
         uint64 clientCount = state.clientProjectCounts.get(clientIndex);
-        state.clientProjects[clientIndex].set(clientCount, projectId);
+        uint64 clientOffset = clientIndex * MAX_PROJECTS_PER_USER + clientCount + 1; // +1 to skip wallet
+        state.clientProjects.set(clientOffset, projectId);
         state.clientProjectCounts.set(clientIndex, clientCount + 1);
         
         // Update provider projects
         findProviderIndex_input pi_input;
         pi_input.wallet = input.providerWallet;
         findProviderIndex_output pi_output;
-        findProviderIndex(qpi, state, pi_input, pi_output);
+        this->findProviderIndex(qpi, state, pi_input, pi_output);
         
         uint64 providerIndex = pi_output.index;
         uint64 providerCount = state.providerProjectCounts.get(providerIndex);
-        state.providerProjects[providerIndex].set(providerCount, projectId);
+        uint64 providerOffset = providerIndex * MAX_PROJECTS_PER_USER + providerCount + 1; // +1 to skip wallet
+        state.providerProjects.set(providerOffset, projectId);
         state.providerProjectCounts.set(providerIndex, providerCount + 1);
         
         // Update counters
@@ -219,7 +295,7 @@ private:
         findProject_input fp_input;
         fp_input.projectId = input.projectId;
         findProject_output fp_output;
-        findProject(qpi, state, fp_input, fp_output);
+        this->findProject(qpi, state, fp_input, fp_output);
         
         if (!fp_output.exists) {
             return;
@@ -251,7 +327,7 @@ private:
         findProject_input fp_input;
         fp_input.projectId = input.projectId;
         findProject_output fp_output;
-        findProject(qpi, state, fp_input, fp_output);
+        this->findProject(qpi, state, fp_input, fp_output);
         
         if (!fp_output.exists) {
             return;
@@ -283,7 +359,7 @@ private:
         findProject_input fp_input;
         fp_input.projectId = input.projectId;
         findProject_output fp_output;
-        findProject(qpi, state, fp_input, fp_output);
+        this->findProject(qpi, state, fp_input, fp_output);
         
         if (!fp_output.exists) {
             return;
@@ -345,7 +421,7 @@ private:
         findProject_input fp_input;
         fp_input.projectId = input.projectId;
         findProject_output fp_output;
-        findProject(qpi, state, fp_input, fp_output);
+        this->findProject(qpi, state, fp_input, fp_output);
         
         if (!fp_output.exists) {
             return;
@@ -385,7 +461,7 @@ private:
         findProject_input fp_input;
         fp_input.projectId = input.projectId;
         findProject_output fp_output;
-        findProject(qpi, state, fp_input, fp_output);
+        this->findProject(qpi, state, fp_input, fp_output);
         
         output.exists = fp_output.exists;
         if (output.exists) {
@@ -397,15 +473,17 @@ private:
         findClientIndex_input ci_input;
         ci_input.wallet = qpi.invocator();
         findClientIndex_output ci_output;
-        findClientIndex(qpi, state, ci_input, ci_output);
+        this->findClientIndex(qpi, state, ci_input, ci_output);
         
         output.count = 0;
         if (ci_output.exists) {
             uint64 clientIndex = ci_output.index;
-            output.count = state.clientProjectCounts.get(clientIndex);
+            uint64 projectCount = state.clientProjectCounts.get(clientIndex);
+            output.count = projectCount;
             
-            for (uint64 i = 0; i < output.count; i++) {
-                output.projectIds.set(i, state.clientProjects[clientIndex].get(i));
+            for (uint64 i = 0; i < projectCount; i++) {
+                uint64 offset = clientIndex * MAX_PROJECTS_PER_USER + i + 1; // +1 to skip wallet
+                output.projectIds.set(i, state.clientProjects.get(offset));
             }
         }
     _
@@ -414,15 +492,17 @@ private:
         findProviderIndex_input pi_input;
         pi_input.wallet = qpi.invocator();
         findProviderIndex_output pi_output;
-        findProviderIndex(qpi, state, pi_input, pi_output);
+        this->findProviderIndex(qpi, state, pi_input, pi_output);
         
         output.count = 0;
         if (pi_output.exists) {
             uint64 providerIndex = pi_output.index;
-            output.count = state.providerProjectCounts.get(providerIndex);
+            uint64 projectCount = state.providerProjectCounts.get(providerIndex);
+            output.count = projectCount;
             
-            for (uint64 i = 0; i < output.count; i++) {
-                output.projectIds.set(i, state.providerProjects[providerIndex].get(i));
+            for (uint64 i = 0; i < projectCount; i++) {
+                uint64 offset = providerIndex * MAX_PROJECTS_PER_USER + i + 1; // +1 to skip wallet
+                output.projectIds.set(i, state.providerProjects.get(offset));
             }
         }
     _
