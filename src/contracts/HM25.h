@@ -166,6 +166,13 @@ protected:
     uint64 totalFeesPaid;
 
     // Local structures for procedure implementation
+    struct calculatePartialPayment_locals {
+        Project project;
+        uint64 totalEpochs;
+        uint64 elapsedEpochs;
+        uint64 percentComplete;
+    };
+
     struct createProject_locals {
         Project newProject;
         uint64 projectId;
@@ -185,7 +192,9 @@ protected:
     struct approveProject_locals {
         Project project;
         HM25Logger log;
-        calculatePartialPayment_locals calculatePartialPayment_locals;
+        calculatePartialPayment_input calc_input;
+        calculatePartialPayment_output calc_output;
+        calculatePartialPayment_locals calc_locals;
     };
 
     struct cancelProject_locals {
@@ -195,6 +204,7 @@ protected:
         HM25Logger log;
         calculatePartialPayment_input calc_input;
         calculatePartialPayment_output calc_output;
+        calculatePartialPayment_locals calc_locals;
     };
 
     struct refundProject_locals {
@@ -210,6 +220,7 @@ protected:
     struct getProjectInfo_locals {
         calculatePartialPayment_input calc_input;
         calculatePartialPayment_output calc_output;
+        calculatePartialPayment_locals calc_locals;
     };
 
     struct getClientProjects_locals {
@@ -218,13 +229,6 @@ protected:
 
     struct getProviderProjects_locals {
         uint64 count;
-    };
-
-    struct calculatePartialPayment_locals {
-        Project project;
-        uint64 totalEpochs;
-        uint64 elapsedEpochs;
-        uint64 percentComplete;
     };
 
     struct END_EPOCH_locals {
@@ -530,7 +534,7 @@ protected:
         
         // Calculate partial payments
         locals.calc_input.projectId = input.projectId;
-        calculatePartialPayment(qpi, state, locals.calc_input, locals.calc_output, locals.calculatePartialPayment_locals);
+        calculatePartialPayment(qpi, state, locals.calc_input, locals.calc_output, locals.calc_locals);
         locals.clientAmount = locals.calc_output.clientAmount;
         locals.providerAmount = locals.calc_output.providerAmount;
         
@@ -717,7 +721,7 @@ protected:
         // Calculate partial payment if in funded state
         if (project.status == HM25_STATUS_FUNDED) {
             locals.calc_input.projectId = input.projectId;
-            calculatePartialPayment(qpi, state, locals.calc_input, locals.calc_output, locals.calculatePartialPayment_locals);
+            calculatePartialPayment(qpi, state, locals.calc_input, locals.calc_output, locals.calc_locals);
             output.partialPaymentAmount = locals.calc_output.providerAmount;
         }
     _
