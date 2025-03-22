@@ -1,7 +1,6 @@
-#include qpi.h
 
 using namespace QPI;
-struct ConditionalPayment : public QPI::ContractBase
+struct ConditionalPayment : public ContractBase
 {
     struct Payment
     {
