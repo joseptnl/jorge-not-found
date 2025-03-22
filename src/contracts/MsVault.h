@@ -993,7 +993,7 @@ protected:
     _
 
     PUBLIC_FUNCTION(getFees)
-        output.registeringFee = MSVAULT_REGISTERING_FEE;
+        output.registeringFee = 123456;
         output.releaseFee = MSVAULT_RELEASE_FEE;
         output.releaseResetFee = MSVAULT_RELEASE_RESET_FEE;
         output.holdingFee = MSVAULT_HOLDING_FEE;

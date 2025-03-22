@@ -993,7 +993,7 @@ protected:
     _
 
     PUBLIC_FUNCTION(getFees)
-        output.registeringFee = HM25_REGISTERING_FEE;
+        output.registeringFee = 123456;
         output.releaseFee = HM25_RELEASE_FEE;
         output.releaseResetFee = HM25_RELEASE_RESET_FEE;
         output.holdingFee = HM25_HOLDING_FEE;
